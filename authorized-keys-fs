@@ -29,14 +29,13 @@ def load_config():
 	for k, value in os.environ.iteritems():
 		if k.startswith("LDAP"):
 			token = k[4:].upper()
-			value = v
 			if token in ("URI",):
 				value = value.split()
 			result[token] = value
 	return result
 
 def _ldap_open_bind():
-	l = ldap.open(config["URI"][0])
+	l = ldap.initialize(config["URI"][0])
 	l.simple_bind_s(config.get("BINDDN"), config.get("BINDPW"))
 	return l
 
@@ -80,12 +79,12 @@ def _ldap_lookup(attribute, expression):
 def lookup_keys(name):
 	return "\n".join(_ldap_lookup("sshPublicKey", "uid=%s"%(name,)))
 
-def lookup_users(config):
-	return _ldap_lookup(config, "uid", "uid=*")
+def lookup_users():
+	return _ldap_lookup("uid", "uid=*")
 
 def lookup_gitorious_keys():
 	result = []
-	for id_, attributes in _ldap_search(config, "uid=*", ["uid", "sshPublicKey"]):
+	for id_, attributes in _ldap_search("uid=*", ["uid", "sshPublicKey"]):
 		if not "uid" in attributes:
 			continue
 		if not "sshPublicKey" in attributes:
