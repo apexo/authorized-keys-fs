@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+
+PACKAGE=$(shell dh_listpackages)
+DESTDIR=$(CURDIR)/debian/${PACKAGE}
+
+build:
+
+binary-indep:
+	mkdir -p ${DESTDIR}
+	mkdir -p ${DESTDIR}/usr/bin/
+	mkdir -p ${DESTDIR}/etc/default/
+	install authorized-keys-fs ${DESTDIR}/usr/bin/
+	install -m 600 config ${DESTDIR}/etc/default/authorized-keys-fs
+	dh_installinit --no-start
+	dh_installdeb
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary-arch:
+
+binary: binary-arch binary-indep
+
+clean:
+	dh_testdir
+	dh_testroot
+	dh_clean 

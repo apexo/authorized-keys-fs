@@ -1,0 +1,16 @@
+Source: authorized-keys-fs
+Section: net
+Priority: extra
+Maintainer: Christian Schubert <mail@apexo.de>
+Build-Depends: debhelper (>= 4.0.0), python
+Standards-Version: 3.6.0
+
+Package: authorized-keys-fs
+Architecture: any
+Depends: python-fuse, python-ldap, python (>= 2.6), python (<< 2.8)
+Description: SSH / LDAP integration via FUSE
+ This package contains the authorized-keys-fs which mounts a FUSE filesystem that
+ can be used to query SSH authorized keys from LDAP, recommended to be used with
+ option
+   AuthorizedKeysFile /var/run/authorized-keys-fs/%u
+ in /etc/ssh/sshd.conf

@@ -1,0 +1,107 @@
+#!/bin/bash
+
+### BEGIN INIT INFO
+# Provides:          authorized-keys-fs
+# Required-Start:    $remote_fs $syslog
+# Required-Stop:     $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Mount LDAP/SSH authorized keys filesystem
+# Description:       OpenSSH / LDAP integration
+### END INIT INFO
+
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+DESC="OpenSSH / LDAP integration"
+NAME=authorized-keys-fs
+DAEMON=/usr/bin/authorized-keys-fs
+RETVAL=0
+MOUNTPOINT=/var/run/authorized-keys-fs
+DEFAULTS="/etc/default/authorized-keys-fs"
+
+test -x $DAEMON || { echo "daemon not installed";
+	if [ "$1" = "stop" ]; then exit 0;
+	else exit 5; fi; }
+
+[ -r "$DEFAULTS" ] && . "$DEFAULTS"
+
+
+d_start() {
+	ulimit -c unlimited
+	mkdir $MOUNTPOINT 2>/dev/null || true
+	$DAEMON $MOUNTPOINT -o allow_other,nonempty,nosuid,nodev,ro
+}
+
+d_stop() {
+	umount $MOUNTPOINT || umount -l $MOUNTPOINT
+}
+
+d_status() {
+	grep -q authorized-keys-vs /proc/mounts
+}
+
+case "$1" in
+  start)
+	echo -n "Starting $DESC: $NAME"
+	d_start
+	echo "."
+	;;
+  stop)
+	echo -n "Stopping $DESC: $NAME"
+	d_stop
+	d_status
+	while [ $? == 0 ]
+	do
+		sleep 1
+		echo -n "."
+		d_status
+	done
+	echo " done."
+	;;
+  restart)
+	echo -n "Restarting $DESC: $NAME"
+	d_stop
+	d_status
+	while [ $? == 0 ]
+	do
+		sleep 1
+		echo -n "."
+		d_status
+	done
+	d_start
+	echo " done."
+	;;
+  force-reload)
+	echo -n "Restarting $DESC: $NAME"
+	d_stop
+	d_status
+	while [ $? == 0 ]
+	do
+		sleep 1
+		echo -n "."
+		d_status
+	done
+	d_start
+	echo " done."
+	;;
+  reload)
+	exit 3
+	;;
+  status)
+	echo -n "Status of $DESC: $NAME..."
+	d_status
+	if [ $? == 0 ]; then
+		echo "running."
+		exit 0
+	else
+		echo "stopped."
+		exit 3
+	fi
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2
+	exit 2
+	;;
+esac
+
+exit $RETVAL
