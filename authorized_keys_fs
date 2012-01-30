@@ -1,0 +1,364 @@
+#!/usr/bin/python
+
+import ldap
+import fuse
+import sys
+import os
+import errno
+import time
+import stat
+
+def load_config():
+	result = {}
+	for fname in ("/etc/ldap/ldap.conf", os.path.expanduser("~/ldaprc"), os.path.expanduser("~/.ldaprc"), "ldaprc"):
+		try:
+			f = open("/etc/ldap/ldap.conf")
+		except IOError, e:
+			if e.errno != errno.ENOENT:
+				raise
+			continue
+		for line in f:
+			if not line.strip() or line.startswith("#"):
+				continue
+			token, value = line.split(None, 1)
+			token = token.upper()
+			if token in ("URI",):
+				value = value.split()
+			result[token] = value
+		f.close()
+	for k, value in os.environ.iteritems():
+		if k.startswith("LDAP"):
+			token = k[4:].upper()
+			value = v
+			if token in ("URI",):
+				value = value.split()
+			result[token] = value
+	return result
+
+def _ldap_open_bind():
+	l = ldap.open(config["URI"][0])
+	l.simple_bind_s(config.get("BINDDN"), config.get("BINDPW"))
+	return l
+
+class Error(IOError):
+	def __init__(self, eno, detail=None):
+		if detail is None:
+			detail = os.strerror(eno)
+		super(Error, self).__init__(eno, detail)
+
+fuse.fuse_python_api = (0, 2)
+
+def _ldap_search(expression, attributes):
+	try:
+		l = _ldap_open_bind()
+		result_id = l.search(config["BASE"], ldap.SCOPE_SUBTREE, expression, attributes)
+		result_set = []
+		while True:
+			result_type, result_data = l.result(result_id, 0, timeout=5)
+			if not result_data:
+				break
+			elif result_type == ldap.RES_SEARCH_ENTRY:
+				result_set += result_data
+		return result_set
+	except ldap.SERVER_DOWN:
+		return []
+
+def _ldap_lookup(attribute, expression):
+	result_set = _ldap_search(expression, [attribute])
+	result = []
+	for id_, attributes in result_set:
+		if attribute not in attributes:
+			continue
+		value = attributes[attribute]
+		if isinstance(value, list):
+			result += [v.strip() for v in value]
+		else:
+			result.append(value.strip())
+	#print repr(result)
+	return result
+
+def lookup_keys(name):
+	return "\n".join(_ldap_lookup("sshPublicKey", "uid=%s"%(name,)))
+
+def lookup_users(config):
+	return _ldap_lookup(config, "uid", "uid=*")
+
+def lookup_gitorious_keys():
+	result = []
+	for id_, attributes in _ldap_search(config, "uid=*", ["uid", "sshPublicKey"]):
+		if not "uid" in attributes:
+			continue
+		if not "sshPublicKey" in attributes:
+			continue
+		uid = attributes["uid"]
+		if isinstance(uid, list):
+			uid = uid[0]
+		sshPublicKeys = attributes["sshPublicKey"]
+		if not isinstance(sshPublicKeys, list):
+			sshPublicKeys = [sshPublicKeys]
+		for key in sshPublicKeys:
+			result.append('command="gitorious %s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %s' % (uid, key))
+	return "\n".join(result)
+
+def getent(path):
+	if path == "/":
+		return None
+	base, name = os.path.split(path)
+	if base != "/":
+		return None
+	if name == "git":
+		result = lookup_gitorious_keys()
+	else:
+		result = lookup_keys(name)
+	try:
+		result = open(os.path.expanduser("~" + name + "/.ssh/authorized_keys"), "r").read().strip() + "\n" + result
+	except IOError:
+		pass
+	return result
+
+def log(f):
+	return f
+	n = f.__name__
+	def wrapper(self, *args, **kw):
+		fa = []
+		print "CALL %s.%s(???)" % (self.__class__.__name__, n)
+		print repr(args), repr(kw), type(args), type(kw)
+		"""
+		print 1
+		for a in args:
+			print a, type(a)
+			fa.append(repr(a))
+		print 2
+		for k, v in kw.iteritems():
+			print k, v
+			fa.append("%s=%r" % (k, v))
+		print 3
+		print "CALL %s.%s(%s)" % (self.__class__.__name__, n, ", ".join(fa))
+		"""
+		try:
+			result = f(self, *args, **kw)
+			print "OK -> %r" % (result,)
+			if hasattr(result, "__dict__"):
+				print result.__dict__
+			return result
+		except BaseException, e:
+			print "ERROR -> %r" % (e,)
+			raise
+	return wrapper
+
+class AuthorizedKeysFile(fuse.FuseFileInfo):
+	@log
+	def __init__(self, path, flags, mode=None):
+		super(AuthorizedKeysFile, self).__init__()
+		if mode is not None:
+			raise Error(errno.EACCESS)
+		if path == "/":
+			raise Error(errno.EISDIR)
+		self.keep_cache = False
+		self.data = getent(path)
+		if self.data is None:
+			raise Error(errno.ENOENT)
+
+	@log
+	def read(self, len, offset):
+		return self.data[offset:offset+len]
+
+	@log
+	def write(self, buf, offset):
+		raise Error(errno.EACCESS)
+
+	@log
+	def release(self, flags):
+		self.data = None
+
+	@log
+	def fsync(self, isfsyncfile):
+		pass
+
+	@log
+	def flush(self):
+		pass
+
+	@log
+	def fgetattr(self):
+		return fuse.Stat(
+			st_mode = 0100444,
+			st_ino = 0,
+			st_dev = 0,
+			st_nlink = 1,
+			st_uid = 0,
+			st_gid = 0,
+			st_rdev = 0,
+			st_blksize = 4096,
+			st_blocks = 1,
+			st_size = len(self.data),
+			st_atime = _time,
+			st_mtime = _time,
+			st_ctime = _time,
+		)
+
+	@log
+	def ftruncate(self, len):
+		raise Error(errno.EACCESS)
+
+	@log
+        def lock(self, cmd, owner, **kw):
+		raise Error(errno.ENOSYS)
+
+_time = time.time()
+
+class NullFS(fuse.Fuse):
+	file_class = AuthorizedKeysFile
+
+	def __init__(self, *args, **kw):
+		fuse.Fuse.__init__(self, *args, **kw)
+
+	@log
+	def getattr(self, path):
+		if path == "/":
+			return fuse.Stat(
+				st_mode = stat.S_IFDIR | 0555,
+				st_ino = 0,
+				st_dev = 0,
+				st_nlink = 2,
+				st_uid = 0,
+				st_gid = 0,
+				st_rdev = 0,
+				st_blksize = 4096,
+				st_blocks = 1,
+				st_size = 4096,
+				st_atime = _time,
+				st_mtime = _time,
+				st_ctime = _time,
+			)
+		ent = getent(path)
+		if ent is None:
+			raise Error(errno.ENOENT)
+		return fuse.Stat(
+			st_mode = 0100444,
+			st_ino = 0,
+			st_dev = 0,
+			st_nlink = 1,
+			st_uid = 0,
+			st_gid = 0,
+			st_rdev = 0,
+			st_blksize = 4096,
+			st_blocks = 1,
+			st_size = len(ent),
+			st_atime = _time,
+			st_mtime = _time,
+			st_ctime = _time,
+		)
+
+
+	@log
+	def readdir(self, path, offset):
+		if path != "/":
+			raise Error(errno.ENOENT)
+		return map(fuse.Direntry, lookup_users())
+
+	@log
+	def chmod(self, path, mode):
+		if path == "/" or getent(path) is not None:
+			raise Error(errno.EACCESS)
+		else:
+			raise Error(errno.ENOENT)
+
+	@log
+	def chown(self, path, uid, gid):
+		if path == "/" or getent(path) is not None:
+			raise Error(errno.EACCESS)
+		else:
+			raise Error(errno.ENOENT)
+
+	@log
+	def link(self, targetPath, linkPath):
+		raise Error(errno.EACCESS)
+
+	@log
+	def mkdir(self, path, mode):
+		raise Error(errno.EACCESS)
+
+	@log
+	def mknod(self, path, mode, dev):
+		raise Error(errno.EACCESS)
+
+	@log
+	def readlink(self, path):
+		if path == "/" or getent(path) is not None:
+			raise Error(errno.EINVAL)
+		else:
+			raise Error(errno.ENOENT)
+
+	@log
+	def rename(self, oldPath, newPath):
+		if oldPath == "/" or getent(oldPath) is not None:
+			raise Error(errno.EACCESS)
+		else:
+			raise Error(errno.ENOENT)
+
+	@log
+	def rmdir(self, path):
+		if path == "/":
+			raise Error(errno.ENOTEMPTY)
+		if getent(path) is None:
+			raise Error(errno.ENOENT)
+		raise Error(errno.ENOTDIR)
+
+	"""
+	@log
+	def statfs(self):
+		return posix.statvfs_result((
+			1, # bsize,
+			0, # frsize,
+			0, # blocks,
+			0, # bfree,
+			0, # bavail,
+			1, # files,
+			0, # ffree,
+			0, # favail,
+			0, # flag,
+			255, # namemax
+		))
+	"""
+
+	@log
+	def symlink(self, targetPath, linkPath):
+		raise Error(errno.EACCESS)
+
+	@log
+	def unlink(self, path):
+		if path == "/":
+			raise Error(errno.EISDIR)
+		if getent(path) is None:
+			raise Error(errno.ENOENT)
+		raise Error(errno.EACCESS)
+
+	@log
+	def utime(self, path, times):
+		if path == "/" or getent(path) is not None:
+			raise Error(errno.EACCESS)
+		else:
+			raise Error(errno.ENOENT)
+
+	@log
+	def fsinit(self):
+		pass
+
+	@log
+	def access(self, path, mode):
+		if mode == os.F_OK and path != "/" and getent(path) is None:
+			raise Error(errno.EACCESS)
+		if mode & os.W_OK:
+			raise Error(errno.EACCESS)
+		if (mode & os.X_OK) and path != "/":
+			raise Error(errno.EACCESS)
+		if (mode & os.R_OK) and path != "/" and getent(path) is None:
+			raise Error(errno.EACCESS)
+if __name__ == '__main__':
+	config = load_config()
+	fs = NullFS()
+	fs.flags = 0
+	fs.multithreaded = 0
+	fs.parse(sys.argv)
+	fs.main()
