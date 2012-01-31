@@ -1,0 +1,18 @@
+# LDAP settings, can also be configured via ldap.conf
+#export LDAPURI=ldap.example.com
+#export LDAPBASE=dc=example,dc=com
+#export LDAPBINDDN=bind_user
+#export LDAPBINDPW=bind_password
+
+# default settings
+#export USER_GROUP=
+#export USER_KEYFMT='%(sshPublicKey)s'
+#export USER_BASE=
+#export USER_ITERATE=sshPublicKey
+#export USER_REQUIRE=
+#export USER_FILTER=
+
+# non-default settings
+#export USER_ROOT_GROUP=ldap_group
+#export USER_GIT_GROUP=ldap_group
+#export USER_GIT_KEYFMT='command="gitorious %(uid)s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %(sshPublicKey)s'

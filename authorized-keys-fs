@@ -1,15 +1,30 @@
 #!/usr/bin/python
 
 import ldap
+import ldap.filter
 import fuse
 import sys
 import os
 import errno
 import time
 import stat
+import socket
+import traceback
 
 def load_config():
-	result = {}
+	result = {
+		"USER": {
+			None: {
+				"KEYFMT": "%(sshPublicKey)s",
+				"ITERATE": "sshPublicKey",
+				"GROUP": None,
+				"FILTER": None,
+				"BASE": None,
+				"SELF": None,
+				"REQUIRE": None,
+			},
+		},
+	}
 	for fname in ("/etc/ldap/ldap.conf", os.path.expanduser("~/ldaprc"), os.path.expanduser("~/.ldaprc"), "ldaprc"):
 		try:
 			f = open("/etc/ldap/ldap.conf")
@@ -32,6 +47,129 @@ def load_config():
 			if token in ("URI",):
 				value = value.split()
 			result[token] = value
+		if k.startswith("USER_"):
+			k2 = k[5:]
+			if k2 in ("KEYFMT", "GROUP", "FILTER", "ITERATE", "BASE", "SELF", "REQUIRE"):
+				result["USER"][None][k2] = value
+			elif k2.endswith("_KEYFMT") or k2.endswith("_GROUP") or k2.endswith("_FILTER") or k2.endswith("_ITERATE") or k2.endswith("_BASE") or k2.endswith("_SELF") or k2.endswith("REQUIRE"):
+				uid, k3 = k2.rsplit("_", 1)
+				result["USER"].setdefault(uid.lower(), {})[k3] = value
+	return result
+
+class DictKeyLogger(object):
+	def __init__(self):
+		self.keys = []
+
+	def __getitem__(self, key):
+		self.keys.append(key)
+		return ""
+
+def _and(*expressions):
+	expressions = [e for e in expressions if e]
+	if len(expressions) > 1:
+		r = "(&" + "".join(expressions) + ")"
+	elif len(expressions) == 1:
+		r = expressions[0]
+	else:
+		r = None
+	#print r
+	return r
+
+def _eq(key, value):
+	return "(%s=%s)" % (key, ldap.filter.escape_filter_chars(value))
+
+def _iterate(keys, attributes, i=0):
+	if i >= len(keys):
+		yield attributes
+		return
+	values = attributes.get(keys[i], [])
+	if not isinstance(values, list):
+		values = [values]
+	a2 = dict(attributes)
+	for value in values:
+		a2[keys[i]] = value
+		for a3 in _iterate(keys, a2, i+1):
+			yield a3
+
+def lookup_user_keys(uid):
+	l = _ldap_open_bind()
+	c = {}
+	c.update(config["USER"][None])
+	c.update(config["USER"].get(uid, {}))
+
+	attrs = {
+		"uid": uid,
+		"hostName": socket.gethostname(),
+	}
+
+	members_base = users_base = config["BASE"]
+	base = config["USER"][None]["BASE"]
+	if base:
+		members_base = users_base = base % {"hostName": attrs["hostName"]}
+	base = config["USER"].get(uid, {}).get("BASE")
+	if base:
+		members_base = base % attrs
+	del base
+
+	dkl = DictKeyLogger()
+	c["KEYFMT"] % dkl
+	formatAttributes = list(set(dkl.keys))
+	del dkl
+	iterateAttributes = c["ITERATE"].split()
+	queryAttributes = list(set(formatAttributes) | set(iterateAttributes))
+	singleValueAttributes = set(formatAttributes) - set(iterateAttributes)
+
+	search = []
+	if c["GROUP"]:
+		group = c["GROUP"] % attrs
+		filter_ = "(|(objectClass=groupOfUniqueNames)(objectClass=posixGroup))"
+
+		result_id = l.search(group, ldap.SCOPE_BASE, filter_, ["uniqueMember", "memberUid"])
+		result_set = []
+		result_type, result_data = l.result(result_id, 0, timeout=5)
+		while result_data:
+			if result_type == ldap.RES_SEARCH_ENTRY:
+				result_set += result_data
+			result_type, result_data = l.result(result_id, 0, timeout=5)
+		del result_type, result_data
+		if result_set:
+			for uniqueMember in result_set[0][1].get("uniqueMember", ()):
+				search.append((uniqueMember, ldap.SCOPE_BASE, _and(c["FILTER"])))
+			for memberUid in result_set[0][1].get("memberUid", ()):
+				search.append((members_base, ldap.SCOPE_SUBTREE, _and(_eq("uid", memberUid), c["FILTER"])))
+		del result_set
+	if not c["GROUP"] or c["SELF"]:
+		search.append((users_base, ldap.SCOPE_SUBTREE, _and(_eq("uid", uid), c["FILTER"])))
+
+	requiredAttributes = set((c["REQUIRE"] or "").split()) | set(c["ITERATE"].split())
+	result_set = {}
+	filter2 = "(&%s)" % "".join("(%s=*)"%attr for attr in requiredAttributes)
+	for base, scope, filter_ in search:
+		result_id = l.search(base, scope, _and(filter2, filter_), queryAttributes)
+		result_type, result_data = l.result(result_id, 0, timeout=5)
+		while result_data:
+			if result_type == ldap.RES_SEARCH_ENTRY:
+				for dn, attributes in result_data:
+					result_set[dn] = attributes
+			result_type, result_data = l.result(result_id, 0, timeout=5)
+
+	result = ""
+	for dn, attributes in result_set.iteritems():
+		flag = True
+		for key in singleValueAttributes:
+			values = attributes.get(key, [])
+			if isinstance(values, list):
+				if not values:
+					if key in requiredAttributes:
+						flag = False
+						break
+					attributes[key] = ""
+				else:
+					attributes[key] = values[0]
+		if not flag:
+			continue
+		for a2 in _iterate(iterateAttributes, attributes):
+			result += c["KEYFMT"] % a2 + "\n"
 	return result
 
 def _ldap_open_bind():
@@ -48,60 +186,34 @@ class Error(IOError):
 
 fuse.fuse_python_api = (0, 2)
 
-def _ldap_search(expression, attributes):
-	try:
-		l = _ldap_open_bind()
-		result_id = l.search(config["BASE"], ldap.SCOPE_SUBTREE, expression, attributes)
-		result_set = []
-		while True:
-			result_type, result_data = l.result(result_id, 0, timeout=5)
-			if not result_data:
-				break
-			elif result_type == ldap.RES_SEARCH_ENTRY:
-				result_set += result_data
-		return result_set
-	except ldap.SERVER_DOWN:
-		return []
-
-def _ldap_lookup(attribute, expression):
-	result_set = _ldap_search(expression, [attribute])
-	result = []
-	for id_, attributes in result_set:
-		if attribute not in attributes:
-			continue
-		value = attributes[attribute]
-		if isinstance(value, list):
-			result += [v.strip() for v in value]
-		else:
-			result.append(value.strip())
-	#print repr(result)
-	return result
-
-def lookup_keys(name):
-	return "".join(s+"\n" for s in _ldap_lookup("sshPublicKey", "uid=%s"%(name,)))
-
 def lookup_users():
 	try:
-		return _ldap_lookup("uid", "uid=*")
-	except Exception:
-		raise Error(errno.EIO)
+		l = _ldap_open_bind()
 
-def lookup_gitorious_keys():
-	result = []
-	for id_, attributes in _ldap_search("uid=*", ["uid", "sshPublicKey"]):
-		if not "uid" in attributes:
-			continue
-		if not "sshPublicKey" in attributes:
-			continue
-		uid = attributes["uid"]
-		if isinstance(uid, list):
-			uid = uid[0]
-		sshPublicKeys = attributes["sshPublicKey"]
-		if not isinstance(sshPublicKeys, list):
-			sshPublicKeys = [sshPublicKeys]
-		for key in sshPublicKeys:
-			result.append('command="gitorious %s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %s\n' % (uid, key))
-	return "".join(result)
+		users_base = config["BASE"]
+		base = config["USER"][None]["BASE"]
+		if base:
+			users_base = base % {"hostName": socket.gethostname()}
+		del base
+
+		result_id = l.search(users_base, ldap.SCOPE_SUBTREE, '(uid=*)', ['uid'])
+		result_set = set()
+		result_type, result_data = l.result(result_id, 0, timeout=5)
+		while result_data:
+			if result_type == ldap.RES_SEARCH_ENTRY:
+				for dn, attributes in result_data:
+					uids = attributes.get("uid", [])
+					result_set |= set(uids if isinstance(uids, list) else [uids])
+			result_type, result_data = l.result(result_id, 0, timeout=5)
+		for uid, uc in config["USER"].iteritems():
+			if uid is None:
+				continue
+			if uc["GROUP"]:
+				result_set.add(uid)
+		return sorted(result_set)
+	except Exception:
+		print traceback.format_exc()
+		raise Error(errno.EIO)
 
 def getent(path):
 	if path == "/":
@@ -110,10 +222,7 @@ def getent(path):
 	if base != "/":
 		return None
 	try:
-		if name == "git":
-			result = lookup_gitorious_keys()
-		else:
-			result = lookup_keys(name)
+		result = lookup_user_keys(name)
 	except KeyError, e:
 		result = "# LDAP error: option %r not configured\n" % (e.args[0],)
 	except ldap.SERVER_DOWN, e:
@@ -121,7 +230,7 @@ def getent(path):
 	except ldap.UNWILLING_TO_PERFORM, e:
 		result = "# LDAP error: UNWILLING_TO_PERFORM (wrong or missing authentication); %r\n" % (e,)
 	except Exception, e:
-		result = "# LDAP error: unknown error; %r\n" % (e,)
+		result = "# LDAP error: unknown error; %r\n" % (e,) + traceback.format_exc()
 	try:
 		result = open(os.path.expanduser("~" + name + "/.ssh/authorized_keys"), "r").read().strip() + "\n" + result
 	except IOError:
