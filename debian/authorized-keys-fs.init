@@ -29,6 +29,7 @@ test -x $DAEMON || { echo "daemon not installed";
 d_start() {
 	ulimit -c unlimited
 	mkdir $MOUNTPOINT 2>/dev/null || true
+	modprobe fuse || true
 	$DAEMON $MOUNTPOINT -o allow_other,nonempty,nosuid,nodev,ro
 }
 
