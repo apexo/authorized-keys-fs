@@ -36,7 +36,8 @@ def load_config():
 
 def _ldap_open_bind():
 	l = ldap.initialize(config["URI"][0])
-	l.simple_bind_s(config.get("BINDDN"), config.get("BINDPW"))
+	if config.get("BINDDN"):
+		l.simple_bind_s(config.get("BINDDN"), config.get("BINDPW", ""))
 	return l
 
 class Error(IOError):
@@ -77,10 +78,13 @@ def _ldap_lookup(attribute, expression):
 	return result
 
 def lookup_keys(name):
-	return "\n".join(_ldap_lookup("sshPublicKey", "uid=%s"%(name,)))
+	return "".join(s+"\n" for s in _ldap_lookup("sshPublicKey", "uid=%s"%(name,)))
 
 def lookup_users():
-	return _ldap_lookup("uid", "uid=*")
+	try:
+		return _ldap_lookup("uid", "uid=*")
+	except Exception:
+		raise Error(errno.EIO)
 
 def lookup_gitorious_keys():
 	result = []
@@ -96,8 +100,8 @@ def lookup_gitorious_keys():
 		if not isinstance(sshPublicKeys, list):
 			sshPublicKeys = [sshPublicKeys]
 		for key in sshPublicKeys:
-			result.append('command="gitorious %s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %s' % (uid, key))
-	return "\n".join(result)
+			result.append('command="gitorious %s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %s\n' % (uid, key))
+	return "".join(result)
 
 def getent(path):
 	if path == "/":
@@ -105,10 +109,19 @@ def getent(path):
 	base, name = os.path.split(path)
 	if base != "/":
 		return None
-	if name == "git":
-		result = lookup_gitorious_keys()
-	else:
-		result = lookup_keys(name)
+	try:
+		if name == "git":
+			result = lookup_gitorious_keys()
+		else:
+			result = lookup_keys(name)
+	except KeyError, e:
+		result = "# LDAP error: option %r not configured\n" % (e.args[0],)
+	except ldap.SERVER_DOWN, e:
+		result = "# LDAP error: SERVER_DOWN; %r\n" % (e,)
+	except ldap.UNWILLING_TO_PERFORM, e:
+		result = "# LDAP error: UNWILLING_TO_PERFORM (wrong or missing authentication); %r\n" % (e,)
+	except Exception, e:
+		result = "# LDAP error: unknown error; %r\n" % (e,)
 	try:
 		result = open(os.path.expanduser("~" + name + "/.ssh/authorized_keys"), "r").read().strip() + "\n" + result
 	except IOError:
